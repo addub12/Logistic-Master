@@ -1,32 +1,25 @@
 import streamlit as st
 import pandas as pd
-import pydeck as pdk
 from streamlit_gsheets import GSheetsConnection
-import streamlit.components.v1 as components # Добавили библиотеку для JavaScript
+import streamlit.components.v1 as components
 
 # 1. Конфигурация страницы
 st.set_page_config(
-    page_title="Falcon Group | L-Control Dashboard", 
-    page_icon="🦅", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
+    page_title="Falcon Control Tower | Owner Mode",
+    page_icon="📈",
+    layout="wide"
 )
 
-# --- ЖЕСТКИЙ JAVASCRIPT ФИКС ДЛЯ TELEGRAM ---
-# Этот невидимый блок перехватывает свайпы на карте и не дает Telegram их увидеть
+# --- JAVASCRIPT ФИКС ДЛЯ TELEGRAM ---
 components.html(
     """
     <script>
     const parent = window.parent.document;
-    
     function stopTelegramSwipe(e) {
-        // Если касание произошло внутри карты, блокируем передачу события выше
-        if(e.target.closest('.mapboxgl-map') || e.target.closest('[data-testid="stDeckGlJsonChart"]')) {
+        if(e.target.closest('.stDataFrame') || e.target.closest('.stTable')) {
             e.stopPropagation();
         }
     }
-    
-    // Перехватываем на этапе погружения (capture: true), чтобы ударить первыми
     parent.addEventListener('touchstart', stopTelegramSwipe, {passive: false, capture: true});
     parent.addEventListener('touchmove', stopTelegramSwipe, {passive: false, capture: true});
     </script>
@@ -34,52 +27,24 @@ components.html(
     height=0, width=0
 )
 
-# --- ИНТЕГРАЦИЯ КОРПОРАТИВНОГО СТИЛЯ (CSS) ---
+# --- КОРПОРАТИВНЫЙ СТИЛЬ (OWNER DARK GOLD) ---
 st.markdown("""
     <style>
-    /* Темно-синий фон для боковой панели */
-    [data-testid="stSidebar"] {
-        background-color: #0b2239;
+    [data-testid="stSidebar"] { background-color: #0b2239; }
+    [data-testid="stSidebar"] * { color: white !important; }
+    .status-light {
+        height: 15px; width: 15px; border-radius: 50%; display: inline-block; margin-right: 5px;
     }
+    .red { background-color: #ff4b4b; }
+    .yellow { background-color: #ffa500; }
+    .green { background-color: #00c851; }
     
-    /* Белый текст в боковой панели */
-    [data-testid="stSidebar"] * {
-        color: white !important;
-    }
-
-    /* Стилизация кнопок */
-    div.stButton > button:first-child {
-        background-color: #c41230;
-        color: white;
-        border: none;
-        border-radius: 4px;
-    }
-    div.stButton > button:first-child:hover {
-        background-color: #a30e27;
-        color: white;
-    }
-
-    /* Стилизация активной вкладки */
-    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] {
-        color: #c41230 !important;
-        border-bottom-color: #c41230 !important;
-    }
-    
-    /* Цвет значений метрик */
-    [data-testid="stMetricValue"] {
-        color: white !important; 
-    }
-    
-    /* Цвет названий метрик */
-    [data-testid="stMetricLabel"] {
-        color: #e0e0e0 !important; 
-    }
-
-    /* Отключаем свайпы по краям экрана для всего приложения */
-    html, body, .stApp {
-        overscroll-behavior-y: none !important;
-        overscroll-behavior-x: none !important;
-        overflow-x: hidden;
+    /* Стилизация карточек */
+    div[data-testid="stMetric"] {
+        background-color: #1e3a5f;
+        padding: 15px;
+        border-radius: 10px;
+        border-left: 5px solid #c41230;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -89,133 +54,90 @@ try:
     conn = st.connection("gsheets", type=GSheetsConnection)
     df = conn.read(ttl=0)
 except Exception as e:
-    st.error(f"Ошибка подключения к Google Sheets: {e}")
+    st.error(f"Ошибка данных: {e}")
     st.stop()
 
-# 3. Боковая панель и настройки путей
-LOGO_PATH = "IMG_20260430_182902.webp" 
-GITHUB_PHOTOS_FOLDER = "https://raw.githubusercontent.com/addub12/logistics-mvp/main/Photo/"
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ "ЛАМПОЧЕК" ---
+def get_money_light(row):
+    if row['balance'] < -500000: return "🔴" # Большой долг
+    if row['demurrage_free_days'] < 2: return "🟡" # Скоро штраф
+    return "🟢"
 
-st.sidebar.image(LOGO_PATH, use_container_width=True)
-st.sidebar.markdown("<br>", unsafe_allow_html=True)
+def get_ops_light(row):
+    if row['delay_days'] > 3: return "🔴"
+    if row['delay_days'] > 0: return "🟡"
+    return "🟢"
 
-st.sidebar.title("Личный кабинет")
+def get_retention_light(row):
+    # Логика: если задержка или высокий затор — клиент может нервничать
+    if row['border_congestion'] == "Высокий": return "🟡"
+    return "🟢"
 
-clients = df['client_name'].unique()
-selected_client = st.sidebar.selectbox("Выберите компанию:", clients)
-client_data = df[df['client_name'] == selected_client]
+# 3. ХЕДЕР: Агрегированные показатели (Header)
+st.title("🦅 Control Tower: Profit & Risk")
+st.subheader("Сводный отчет по всей компании")
 
-st.sidebar.markdown("---")
-manager_name = client_data['manager_name'].iloc[0]
-st.sidebar.subheader("Ваш менеджер")
-st.sidebar.info(f"👤 {manager_name}")
-if st.sidebar.button("💬 Написать в чат"):
-    st.sidebar.success("Чат открыт (внутренняя система Falcon)")
+m1, m2, m3, m4 = st.columns(4)
 
-# 4. Главный экран: Верхние метрики
-st.title(f"Мониторинг грузов: {selected_client}")
+# Пример расчетов (в реале берем суммы из колонок)
+money_at_risk = df[df['balance'] < 0]['balance'].sum() * -1
+leakage_monthly = 145000 # Допустим, сумма штрафов из таблицы
+ltv_potential = df['customs_fee_forecast'].sum() * 0.2 # Пример маржи 20%
 
-# Подсказка для пользователей Telegram (очень спасает конверсию и нервы клиентов!)
-st.caption("💡 *Если вы открыли ссылку в мессенджере (Telegram/WhatsApp) и карта листается с ошибками — нажмите 'Открыть в браузере' (Safari/Chrome) в меню.*")
+m1.metric("Money at Risk (Дебиторка)", f"{money_at_risk:,.0f} ₽", "-12% за неделю")
+m2.metric("Leakage (Утечки мес.)", f"{leakage_monthly:,.0f} ₽", "Штрафы/Простои", delta_color="inverse")
+m3.metric("LTV Potential (Прогноз)", f"{ltv_potential:,.0f} ₽", "Текущий поток")
+m4.metric("Активных клиентов", len(df['client_name'].unique()))
 
-shipment_ids = client_data['shipment_id'].unique()
-selected_shipment_id = st.selectbox("Выберите номер груза для деталей:", shipment_ids)
-ship = client_data[client_data['shipment_id'] == selected_shipment_id].iloc[0]
+st.markdown("---")
 
-col1, col2, col3, col4 = st.columns(4)
+# 4. ГЛАВНАЯ ПАНЕЛЬ: Система "Светофор"
+st.subheader("🚨 Мониторинг критических зон (по клиентам)")
 
-balance = ship['balance']
-col1.metric("Текущий баланс", f"{balance:,.0f} ₽", delta="К оплате" if balance < 0 else "Ок", delta_color="normal" if balance >= 0 else "inverse")
-
-demurrage = ship['demurrage_free_days']
-col2.metric("Дней до платного хранения", f"{demurrage} дн.", delta="- Внимание" if demurrage <= 3 else "Ок", delta_color="inverse" if demurrage <= 3 else "normal")
-
-delay = int(ship['delay_days'])
-col3.metric("Задержка (План/Факт)", f"{delay} дн.", delta=f"+{delay} дн." if delay > 0 else "В графике", delta_color="inverse" if delay > 0 else "normal")
-
-congestion = ship['border_congestion']
-col4.metric("Затор на границе", congestion, delta="Влияет на ETA" if congestion == "Высокий" else None, delta_color="inverse" if congestion == "Высокий" else "normal")
-
-# 5. Основной контент
-tab1, tab2, tab3, tab4 = st.tabs(["📍 Карта и Трекинг", "💰 Финансы и Таможня", "📑 Документы и Фото", "📈 Аналитика"])
-
-with tab1:
-    st.subheader("Местоположение 24/7 (п. 2.1)")
-    view_state = pdk.ViewState(latitude=ship['lat'], longitude=ship['lon'], zoom=5, pitch=0)
-    layer = pdk.Layer(
-        "ScatterplotLayer",
-        data=pd.DataFrame([{'lat': ship['lat'], 'lon': ship['lon']}]),
-        get_position="[lon, lat]",
-        get_color="[196, 18, 48, 200]", 
-        get_radius=25000,
-    )
-    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state))
+# Создаем таблицу для собственника
+summary_data = []
+for client in df['client_name'].unique():
+    c_df = df[df['client_name'] == client].iloc[0]
     
-    c1, c2 = st.columns(2)
-    with c1:
-        st.info(f"**Статус:** {ship['status']}")
-        st.write(f"**Прогноз прибытия (ETA):** {ship['eta_predicted']}")
-    with c2:
-        st.warning(f"**Дней простоя на терминале:** {ship['terminal_idle_days']} дн. (п. 4.2)")
+    summary_data.append({
+        "Клиент": client,
+        "Менеджер": c_df['manager_name'],
+        "Финансы": get_money_light(c_df),
+        "Операции": get_ops_light(c_df),
+        "Лояльность": get_retention_light(c_df),
+        "Безопасность": "🟢", # Сюда можно прикрутить проверку доков
+        "Текущий баланс": f"{c_df['balance']:,.0f} ₽",
+        "Shipment ID": c_df['shipment_id']
+    })
 
-with tab2:
-    st.subheader("Финансовый и таможенный контроль")
-    f1, f2 = st.columns(2)
+owner_df = pd.DataFrame(summary_data)
+st.table(owner_df) # Используем таблицу для наглядности "лампочек"
+
+# 5. DRILL-DOWN: Детализация по клику
+st.markdown("---")
+st.subheader("🔍 Детальный разбор проблемной зоны")
+
+selected_client_owner = st.selectbox("Выберите клиента для анализа рисков:", owner_df['Клиент'])
+client_detail = df[df['client_name'] == selected_client_owner].iloc[0]
+
+col_left, col_right = st.columns(2)
+
+with col_left:
+    st.info(f"**Анализ рисков для {selected_client_owner}**")
+    if client_detail['balance'] < 0:
+        st.error(f"⚠️ **Финансовый риск:** Задолженность {client_detail['balance']} ₽. Рекомендация: Остановить отгрузку до оплаты.")
     
-    with f1:
-        with st.container(border=True):
-            st.markdown("#### Валютный калькулятор (п. 1.2)")
-            st.write(f"Текущий курс: **{ship['exchange_rate']} ₽**")
-            st.success("Фиксация курса сегодня сэкономит вам ~12,400 ₽")
-        
-        with st.container(border=True):
-            st.markdown("#### Таможенные платежи (п. 1.3)")
-            st.write(f"Прогноз налогов: **{ship['customs_fee_forecast']:,.0f} ₽**")
-            st.caption("Бюджет спланирован без сюрпризов")
+    if client_detail['demurrage_free_days'] <= 3:
+        st.warning(f"🕒 **Операционный риск:** Осталось {client_detail['demurrage_free_days']} дня бесплатного хранения. Убыток через 48 часов.")
 
-    with f2:
-        with st.container(border=True):
-            st.subheader("Статус оформления (п. 3)")
-            st.write(f"📂 **Документы:** {ship['customs_doc_status']}")
-            st.write(f"📑 **Декларация (ДТ):** {ship['customs_dt_status']}")
-            
-            if ship['inspection_alert'] == "Да":
-                st.error("⚠️ Назначен таможенный досмотр! (п. 3.3)")
-            else:
-                st.success("✅ Проверка проходит без досмотров")
-            
-            st.write(f"🛡️ **Страхование:** {ship['insurance_status']} (п. 6.2)")
+with col_right:
+    st.write(f"**Ответственный менеджер:** {client_detail['manager_name']}")
+    st.button(f"📞 Связаться с менеджером по {selected_client_owner}")
+    st.button(f"📧 Отправить уведомление клиенту о задолженности")
 
-with tab3:
-    st.subheader("Архив и Фотоотчеты")
-    a1, a2 = st.columns(2)
-    with a1:
-        st.write("📷 **Лента фотоотчетов (п. 5.1):**")
-        
-        if 'photo_links' in ship and pd.notna(ship['photo_links']):
-            photos_raw = str(ship['photo_links'])
-            if photos_raw.strip() and photos_raw.lower() not in ['nan', 'none', 'null']:
-                photos = photos_raw.split(',')
-                for p in photos:
-                    filename = p.strip()
-                    if filename:
-                        img_url = f"{GITHUB_PHOTOS_FOLDER}{filename}"
-                        try:
-                            st.image(img_url, caption=f"Отчет: {filename}", use_container_width=True)
-                        except Exception:
-                            st.error(f"Не удалось загрузить: {filename}")
-            else:
-                st.info("Фотоотчеты для данного груза пока не загружены.")
-        else:
-            st.info("Фотоотчеты для данного груза пока не загружены.")
-            
-    with a2:
-        st.write("📂 **Цифровой архив (п. 5.2):**")
-        st.button(f"Скачать документы по грузу {selected_shipment_id}")
-        st.caption(f"Ссылка на Drive: {ship['docs_folder_link']}")
-
-with tab4:
-    st.subheader("Эффективность и LTV")
-    st.write("Здесь будет накапливаться история ваших перевозок для анализа маржинальности и сроков.")
-    chart_data = pd.DataFrame({'Этап': ['Закупка', 'Транзит', 'Таможня', 'Склад'], 'Дней': [5, 12, 3, 2]})
-    st.bar_chart(chart_data, x='Этап', y='Дней', color="#c41230")
+# 6. АНАЛИТИКА ЭФФЕКТИВНОСТИ (Нижний блок)
+with st.expander("📊 Глобальная аналитика задержек и маржинальности"):
+    # Пример графика зависимости задержек от границ
+    delay_analysis = df.groupby('border_congestion')['delay_days'].mean().reset_index()
+    st.bar_chart(delay_analysis, x='border_congestion', y='delay_days', color="#c41230")
+    st.caption("Средняя задержка в зависимости от загруженности границ")
